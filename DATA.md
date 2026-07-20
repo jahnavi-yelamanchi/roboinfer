@@ -165,3 +165,108 @@ pip install -e '.[flow,dev]'
 python -m roboinfer.cli sweep data/libero/*.hdf5   # prints the block above
 pytest -q                                          # injectors + offset-recovery ≤1 frame
 ```
+
+---
+
+## Day 5 — the real-data reality check (the honest one)
+
+Days 1–4 proved recovery of *injected* corruption on *sim* data (LIBERO). That
+proves the detector recovers offsets we planted; it does **not** prove the tool
+works on real teleop, where corruption actually lives. Day 5 ran the same
+pipeline on two real public datasets. The result is sobering and important —
+**the LIBERO numbers largely do not transfer to real data out of the box.**
+
+### New data used (real teleop, LeRobot v3.0, both git-ignored)
+
+| Dataset | Size | Ep | fps | Robot | Cameras |
+|---------|------|----|-----|-------|---------|
+| `lerobot/droid_100` | 464 MB | 100 | 15 | Franka 7-DOF, in-the-wild | 2 exterior + 1 wrist (180×320) |
+| `lerobot/aloha_static_tape` | ~1.2 GB | 50 | 50 | bimanual 14-DOF, tabletop | 4 fixed (480×640) |
+
+New loader `data.py::load_lerobot` reads LeRobot **v3.0** (episodes concatenated
+into shards; `meta/episodes/*.parquet` maps each episode to a parquet row-range +
+per-camera video frame-range). Low-dim via pyarrow, video decoded sequentially
+with cv2 (opencv 5 handles the av1/yuv420p codec — no extra dep), downscaled to
+128px. Same `Episode` dataclass, so estimate/detect/sweep are format-blind.
+CLI auto-dispatches by format (`.hdf5`→LIBERO, dir→LeRobot) and takes `--camera`.
+
+### What happened (both `scan`, no ground truth, and `sweep`, injected GT)
+
+```
+                          LIBERO(sim)   ALOHA(real,structured)   DROID(real,wild)
+offset recovery max          0.43 f            1.24 f                 5.80 f
+offset recovery within±1      100%              82%                    36%
+median confidence            (high)            0.07                   ~0.04
+episodes "verifiable"        most              0 / 50                 0 / 100
+detection F1                 0.86              0.44                   0.30
+  frozen-camera recall       1.00              1.00                   1.00
+  action-family recall       0.86         swap0/offbyk.17/bnd.40      ~0.00
+```
+
+### Three honest findings
+
+1. **The offset estimator partially transfers — structure-dependent.** On ALOHA
+   (fixed cameras, tabletop, arms fill the frame) pooled recovery is **0.91 f
+   median / 1.24 f max** — nearly the kill target; the estimator basically works.
+   On DROID (in-the-wild, varied scenes, arm small in an exterior view) it is
+   **5.80 f** — broken. The vision-motion-vs-joint-velocity correlation needs the
+   camera to actually *see* coherent arm motion; unstructured footage kills it.
+
+2. **Confidence is miscalibrated for real data.** The peak-SNR confidence was
+   tuned on LIBERO's clean correlation, so it reads ~0.07 on *all* real episodes —
+   even ALOHA ones whose pooled estimate is a good 0.91 f. Consequence: the tool
+   currently marks **every** real episode "unverifiable" and abstains. That is
+   honest (it never false-alarms — precision held at 0.91–1.00) but it means the
+   tool cannot yet *positively* verify real data. Recalibrating confidence on real
+   correlation distributions is the #1 fix.
+
+3. **Only frozen-camera detection is embodiment-agnostic.** Frozen recall = 1.00
+   everywhere. The action-consistency family (off-by-k / swap / boundary) is tied
+   to LIBERO's OSC-delta action space where `action → joint_delta` is linear; on
+   DROID's action representation it gives ~0 recall. Drift stayed 0 (already the
+   worst detector; see below). ts_jitter never fired — DROID's LeRobot conversion
+   **regenerated uniform timestamps** (dt ≡ 1/fps exactly), discarding the real
+   capture clock, so the real-timestamp signal isn't available on this release.
+
+### A real precision bug, found and fixed on real data
+
+First DROID `scan` flagged **78/100** episodes, almost all `offset_drift` (values
+3–30 f). Cause: the drift flag fired on first-half-vs-second-half offset *gaps*
+computed from unverifiable (~0-confidence) estimates — pure noise flagged as
+drift. Fix: gate the drift flag on `vj.confidence ≥ 0.15` (matching the other
+offset flags). After the fix, DROID false-positive drift → 0 (sweep precision
+1.00). This is exactly the precision-over-recall failure mode a QA gate must
+avoid: at 76k episodes, 78% false flags would be catastrophic.
+
+### Compute (answers "how long to scan my dataset")
+
+All local CPU, single-thread. DROID `scan` = **~1.4 s/episode** at 128px
+(140 s / 100 ep, decode + flow + all detectors); ALOHA heavier (larger frames).
+Extrapolated to DROID-scale (76k episodes): ~30 CPU-hours single-thread →
+~2–4 h on 8–16 cores, embarrassingly parallel per episode. **No cloud GPU was
+needed for validation** (Modal/vast only matter for a future full-dataset
+benchmark, not this go/no-go).
+
+### Verdict — viability, stated plainly
+
+- **The tool is currently a sim + structured-teleop tool, not an in-the-wild
+  one.** LIBERO ±0.4 f and ALOHA ~0.9 f work; DROID does not. The "audit any
+  fleet" pitch does **not** hold yet — it holds for controlled-rig data.
+- **The existential question is not yet answered.** Neither curated public
+  release showed obvious *real* corruption — the flags we got were mostly detector
+  artifacts, not defects. Curated benchmark datasets are the wrong hunting ground;
+  real corruption lives in **raw, un-curated teleop logs**, which these polished HF
+  releases are not. Proving the problem exists needs raw operator logs (Day 6).
+- **The failures are concentrated and named** (confidence calibration on real
+  correlations, robustness to unstructured motion, action-rep-agnostic
+  consistency), so this is a "needs Day 6–7 work," not necessarily a "dead idea."
+  But the honest state before applying: **real-data efficacy is unproven, and one
+  of two real datasets fails the kill metric.**
+
+### Reproduce (Day 5)
+
+```bash
+python -m roboinfer.cli scan  data/lerobot/droid_100 --camera wrist   # 100% unverifiable, honest abstain
+python -m roboinfer.cli sweep data/lerobot/aloha_static_tape          # 0.91f median (near ±1)
+python -m roboinfer.cli sweep data/lerobot/droid_100 --camera wrist   # 5.80f — FAIL, does not transfer
+```

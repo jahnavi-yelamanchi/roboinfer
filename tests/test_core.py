@@ -36,6 +36,21 @@ def test_injectors_roundtrip():
     assert np.array_equal(sw.joints[:, 1], ep.joints[:, 3])   # columns swapped
 
 
+def test_ts_jitter_score():
+    """Uniform clock scores 1.0 (never flags); a dropped frame spikes the ratio."""
+    from roboinfer.data import Episode
+    from roboinfer.detect import ts_jitter_score, TS_JITTER_K
+    T = 50
+    z = np.zeros((T, 4, 4, 3), np.uint8)
+    j = np.zeros((T, 7)); a = np.zeros((T, 7))
+    uniform = Episode(rgb=z, joints=j, actions=a, ts=np.arange(T) / 20.0, name="u")
+    assert abs(ts_jitter_score(uniform) - 1.0) < 1e-6        # regular clock: no flag
+    ts = np.arange(T) / 20.0
+    ts[25:] += 0.15                                          # a ~3-frame gap (dropped frames)
+    dropped = Episode(rgb=z, joints=j, actions=a, ts=ts, name="d")
+    assert ts_jitter_score(dropped) >= TS_JITTER_K           # flagged
+
+
 @pytest.mark.skipif(_libero_file() is None, reason="LIBERO cache missing")
 def test_offset_recovery_within_one_frame():
     eps = list(load_libero(_libero_file(), limit=40))   # a task's demos = product's pool unit

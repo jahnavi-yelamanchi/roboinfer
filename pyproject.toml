@@ -6,7 +6,8 @@ requires-python = ">=3.10"
 dependencies = ["numpy", "scipy", "h5py", "huggingface-hub", "jinja2"]
 
 [project.optional-dependencies]
-flow = ["opencv-python-headless"]   # optical-flow magnitude signal (slower, opt-in)
+flow = ["opencv-python-headless"]   # optical-flow magnitude signal + mp4 decode
+lerobot = ["pyarrow", "pandas"]     # load_lerobot: real teleop datasets (needs [flow] too)
 dev = ["pytest"]
 
 [project.scripts]

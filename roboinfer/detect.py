@@ -85,6 +85,21 @@ def drift_score(ep, max_lag=15) -> float:
     return abs(o1 - o2)
 
 
+def ts_jitter_score(ep) -> float:
+    """Frame-timing irregularity from the REAL recorded clock: max gap / median
+    gap. 1.0 = perfectly regular. >1 => dropped frames / clock desync — the
+    production failure sim data can't have (LIBERO's ts is synthesized uniform,
+    so this stays 1.0 and never flags there)."""
+    dt = np.diff(np.asarray(ep.ts, float))
+    if len(dt) < 2:
+        return 1.0
+    med = np.median(dt)
+    return float(dt.max() / med) if med > 0 else float("inf")
+
+
+TS_JITTER_K = 1.5   # ponytail: gap 1.5x nominal = likely drop; tune per-rig from data
+
+
 def score_episode(ep, model: ActionModel, baseline_vj=0.0, baseline_as=0.0) -> EpisodeReport:
     vj = vision_joint_offset(ep)
     as_ = action_state_offset(ep)
@@ -92,14 +107,21 @@ def score_episode(ep, model: ActionModel, baseline_vj=0.0, baseline_as=0.0) -> E
     drift = drift_score(ep)
     res = _residual(ep, model.W)
     res_z = (res - model.res_med) / model.res_mad
+    jitter = ts_jitter_score(ep)
 
     r = EpisodeReport(name=ep.name, vj_offset=vj.offset, as_offset=as_.offset,
                       confidence=vj.confidence,
                       scores=dict(vj_conf=vj.confidence, as_conf=as_.confidence,
-                                  frozen_run=run, drift=drift, res_z=res_z))
+                                  frozen_run=run, drift=drift, res_z=res_z,
+                                  ts_jitter=jitter))
     if frozen:
         r.flags.append(f"frozen_camera(run={run})")
-    if drift >= 3.0:
+    if jitter >= TS_JITTER_K:
+        r.flags.append(f"ts_jitter(x{jitter:.1f})")
+    # drift is a gap between two half-window offset estimates; only trust it when
+    # the offset signal itself is verifiable, else unreliable estimates flag noise
+    # as drift (seen on DROID in-the-wild: 78% false drift at conf~0).
+    if drift >= 3.0 and vj.confidence >= 0.15:
         r.flags.append(f"offset_drift({drift:.1f}f)")
     if abs(vj.offset - baseline_vj) >= 2.0 and vj.confidence >= 0.15:
         r.flags.append(f"camera_offset_anomaly({vj.offset - baseline_vj:+.1f}f)")
