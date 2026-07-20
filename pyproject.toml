@@ -1,0 +1,20 @@
+[project]
+name = "roboinfer"
+version = "0.0.1"
+description = "Preflight checks for robot training data — temporal offset + corruption detection for LeRobot/RLDS datasets."
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "h5py", "huggingface-hub", "jinja2"]
+
+[project.optional-dependencies]
+flow = ["opencv-python-headless"]   # optical-flow magnitude signal (slower, opt-in)
+dev = ["pytest"]
+
+[project.scripts]
+roboinfer = "roboinfer.cli:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["roboinfer*"]
