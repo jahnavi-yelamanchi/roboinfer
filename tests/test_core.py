@@ -12,9 +12,11 @@ from roboinfer.signals import vision_motion, joint_motion
 
 
 def _libero_file():
-    hits = glob.glob(os.path.expanduser(
+    repo = os.path.join(os.path.dirname(__file__), "..", "data", "libero", "*.hdf5")
+    cache = os.path.expanduser(
         "~/.cache/huggingface/hub/datasets--yifengzhu-hf--LIBERO-datasets/"
-        "snapshots/*/libero_10/STUDY_SCENE1*demo.hdf5"))
+        "snapshots/*/libero_10/STUDY_SCENE1*demo.hdf5")
+    hits = glob.glob(repo) or glob.glob(cache)     # repo-local data first
     return hits[0] if hits else None
 
 

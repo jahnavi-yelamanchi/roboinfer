@@ -50,18 +50,22 @@ pip install -e '.[flow]'    # + opencv optical flow (sub-frame precision, defaul
 
 ## Use
 
-Download a LIBERO task file (once):
+Data is **not** committed (see `.gitignore`). Download the LIBERO task file used
+for Day 1–4 into `data/libero/` (see `DATA.md` for the exact file + features):
 
 ```python
 from huggingface_hub import hf_hub_download
-hf_hub_download("yifengzhu-hf/LIBERO-datasets",
+import shutil, os
+os.makedirs("data/libero", exist_ok=True)
+p = hf_hub_download("yifengzhu-hf/LIBERO-datasets",
     "libero_10/STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy_demo.hdf5",
-    repo_type="dataset")
+    repo_type="dataset", token=False)   # stored HF OAuth token may be broken; token=False
+shutil.copy(p, "data/libero/")
 ```
 
 ```bash
-python -m roboinfer.cli sweep PATH.hdf5   # injected-corruption proof (the Day-4 metric)
-python -m roboinfer.cli scan  PATH.hdf5   # report offsets + flags on a dataset, no injection
+python -m roboinfer.cli sweep data/libero/*.hdf5   # injected-corruption proof (the Day-4 metric)
+python -m roboinfer.cli scan  data/libero/*.hdf5   # report offsets + flags on a dataset, no injection
 ```
 
 ## Caveats
