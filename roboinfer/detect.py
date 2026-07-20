@@ -100,6 +100,77 @@ def ts_jitter_score(ep) -> float:
 TS_JITTER_K = 1.5   # ponytail: gap 1.5x nominal = likely drop; tune per-rig from data
 
 
+def _flow_halfgap(ep, max_lag=15) -> float:
+    """Within-episode measurement noise on the SAME (flow) signal as the offset:
+    offset on first vs second half. Overestimates full-episode noise (shorter
+    windows) so the anomaly threshold stays conservative."""
+    vm, jm = vision_motion(ep.rgb, "auto"), joint_motion(ep.joints)
+    n = min(len(vm), len(jm)); h = n // 2
+    if h < 20:
+        return 0.0
+    o1 = estimate_offset(vm[:h], jm[:h], max_lag).offset
+    o2 = estimate_offset(vm[h:h + h], jm[h:h + h], max_lag).offset
+    return abs(o1 - o2)
+
+
+def dataset_audit(eps, conf_min=0.3):
+    """Corruption-vs-rig audit for one real dataset (no ground truth).
+
+    The credibility rule: a different rig is *allowed* to have a different
+    systematic offset — that is never corruption. We only flag an episode whose
+    alignment deviates from *this dataset's own* systematic offset by more than
+    *this dataset's own* measurement-noise floor. Cross-rig comparison never
+    enters. Runs only the two signals proven to generalize (offset, frozen);
+    reports over confidence-verifiable episodes only.
+    """
+    hz0 = eps[0].hz if eps else 20.0
+    if hz0 < 5:                                            # too coarse: skip heavy compute
+        return dict(n=len(eps), n_verifiable=0, hz=hz0,
+                    verdict=f"ABSTAIN (fps {hz0:.0f} too coarse for temporal offset)")
+    rows = [(e.name, vision_joint_offset(e), detect_frozen(e)[0],
+             _flow_halfgap(e) if e.T >= 60 else np.nan, e.hz) for e in eps]
+    name = [r[0] for r in rows]
+    off = np.array([r[1].offset for r in rows])
+    conf = np.array([r[1].confidence for r in rows])
+    frozen = np.array([r[2] for r in rows], bool)
+    g = np.array([r[3] for r in rows])                       # within-episode half-gap (noise)
+    hz = rows[0][4] if rows else 20.0
+    ver = conf >= conf_min
+    n, nver = len(eps), int(ver.sum())
+    out = dict(n=n, n_verifiable=nver, hz=hz)
+
+    # abstain guards: don't cry wolf where the method can't measure
+    if hz < 5:
+        out["verdict"] = f"ABSTAIN (fps {hz:.0f} too coarse for temporal offset)"
+        return out
+    valid = ver & ~np.isnan(g)                              # verifiable AND long enough to self-check
+    if int(valid.sum()) < 5:
+        out["verdict"] = "ABSTAIN (too few verifiable, long-enough episodes to calibrate)"
+        return out
+
+    o = off[ver]
+    systematic = float(np.median(o))
+    cross_mad = float(np.median(np.abs(o - systematic)))     # cross-episode spread
+    noise = float(np.median(g[valid]))                       # within-episode meas. noise
+    if noise < 0.1:                                          # degenerate floor => can't threshold
+        out["verdict"] = "ABSTAIN (noise floor uncalibratable — coarse/quantized offsets)"
+        return out
+    tau = max(2.0, 4.0 * noise)
+    # a real misalignment: internally self-consistent (small half-gap) yet far from
+    # the rig's own systematic offset — not merely a noisy estimate that passed the gate
+    self_consistent = g < noise
+    anom = valid & self_consistent & (np.abs(off - systematic) > tau)
+    frozen_v = ver & frozen
+    corrupt = bool(anom.sum() or frozen_v.sum())
+    out.update(systematic_f=systematic, systematic_ms=systematic * 1000.0 / hz,
+               cross_mad=cross_mad, noise_floor=noise, tau=tau,
+               anom_ct=int(anom.sum()), anom_names=[name[i] for i in np.where(anom)[0]][:12],
+               frozen_ct=int(frozen_v.sum()),
+               frozen_names=[name[i] for i in np.where(frozen_v)[0]][:12],
+               verdict="CORRUPTION FOUND" if corrupt else "CLEAN (internally consistent)")
+    return out
+
+
 def score_episode(ep, model: ActionModel, baseline_vj=0.0, baseline_as=0.0) -> EpisodeReport:
     vj = vision_joint_offset(ep)
     as_ = action_state_offset(ep)

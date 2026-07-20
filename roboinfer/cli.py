@@ -8,7 +8,7 @@ import argparse, json, os
 import numpy as np
 from .data import load_libero, load_lerobot
 from .sweep import run_sweep
-from .detect import fit_action_model, score_episode
+from .detect import fit_action_model, score_episode, dataset_audit
 from .estimate import vision_joint_offset, action_state_offset
 
 
@@ -59,10 +59,32 @@ def _scan(args):
         print(f"  {r.name:22s} conf {r.confidence:.2f}  {','.join(r.flags)}")
 
 
+def _audit(args):
+    """Corruption-vs-rig audit of one real dataset (Day 6-7). No ground truth."""
+    eps = _load(args.path, args.limit, args.camera)
+    r = dataset_audit(eps)
+    tag = args.path.rstrip("/").split("/")[-1]
+    print(f"=== {tag} ===  verifiable {r['n_verifiable']}/{r['n']}  (hz {r['hz']:.0f})")
+    if "systematic_f" not in r:
+        print(f"  {r['verdict']}")
+        return
+    print(f"  systematic offset (rig latency, reported): {r['systematic_f']:+.2f}f "
+          f"({r['systematic_ms']:+.0f} ms)")
+    print(f"  measurement-noise floor (within-episode): {r['noise_floor']:.2f}f  "
+          f"-> anomaly threshold {r['tau']:.2f}f")
+    print(f"  cross-episode spread (MAD): {r['cross_mad']:.2f}f")
+    print(f"  candidate corruption: {r['anom_ct']} offset-anomaly, {r['frozen_ct']} frozen")
+    if r["anom_names"]:
+        print(f"    offset-anomaly: {', '.join(r['anom_names'])}")
+    if r["frozen_names"]:
+        print(f"    frozen: {', '.join(r['frozen_names'])}")
+    print(f"  VERDICT: {r['verdict']}")
+
+
 def main():
     p = argparse.ArgumentParser(prog="roboinfer")
     sub = p.add_subparsers(required=True)
-    for name, fn in [("sweep", _sweep), ("scan", _scan)]:
+    for name, fn in [("sweep", _sweep), ("scan", _scan), ("audit", _audit)]:
         s = sub.add_parser(name)
         s.add_argument("path")
         s.add_argument("--limit", type=int, default=40)

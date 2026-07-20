@@ -270,3 +270,112 @@ python -m roboinfer.cli scan  data/lerobot/droid_100 --camera wrist   # 100% unv
 python -m roboinfer.cli sweep data/lerobot/aloha_static_tape          # 0.91f median (near ±1)
 python -m roboinfer.cli sweep data/lerobot/droid_100 --camera wrist   # 5.80f — FAIL, does not transfer
 ```
+
+---
+
+## Day 6–7 — recalibrate confidence, then hunt corruption where it should live
+
+Day 5 said two opposite things: the method *works on structured teleop* (ALOHA
+0.91f) but *abstains on everything* because the confidence metric was tuned on
+LIBERO. And the curated datasets showed no real corruption — because curated HF
+releases are **pre-cleaned**. So Day 6–7 does two things: (A) fix confidence so
+real estimates become trustworthy; (B) hunt in a heterogeneous, less-cleaned
+corpus (Open-X-Embodiment), with a binding go/no-go written before running.
+
+### Phase A — permutation-null confidence (the fixable finding)
+
+Replaced the LIBERO-tuned confidence (`clip(snr/8)·peak`) with a **per-episode
+permutation null**: phase-randomize the vision signal (same power spectrum, no
+real cross-alignment), recompute the correlation peak K=48 times, and set
+confidence from how many sigmas the real peak stands above that null
+(`estimate.py::estimate_offset`, `CONF_Z_FULL=6`). The null is rebuilt per
+episode from the signal's own spectrum — no constant tuned on one corpus.
+
+**Validated against the injected sweep as ground truth:**
+
+| | before | after |
+|--|--|--|
+| ALOHA verifiable | 0 / 50 | **50 / 50** |
+| ALOHA episodes that track a known injected shift | — | **97%** |
+| DROID verifiable (honesty guard: must stay low) | 0 | **~20%** (stays abstained) |
+| LIBERO Day-4 offset recovery | pass | **pass** (pytest green) |
+
+Recalibration converted ALOHA from "abstain" to "verify" **and** kept DROID
+abstained — it didn't just inflate everything. Gate passed.
+
+### Phase B — the OXE audit and the corruption-vs-rig test
+
+**Loader** (`data.py::load_lerobot`) extended for real OXE: LeRobot v3.0,
+partial download (first shards only via `allow_patterns`), and load-time gating
+that drops any dataset without v3.0 layout / `observation.state` / a non-wrist
+camera, filtering the shard by `episode_index` (robust to multi-shard global
+row indexing).
+
+**The credibility core — how we separate *silent corruption* from a
+*legitimately different rig*** (`detect.py::dataset_audit`): never compare across
+rigs. Per dataset: the **median** per-episode offset is that rig's systematic
+latency (*reported, never flagged*). The **within-episode** offset half-gap is
+that dataset's own measurement-noise floor. An episode is flagged only if it is
+**internally self-consistent** (small half-gap) yet deviates from its *own rig's*
+systematic offset by more than 4× the noise floor. Plus abstain guards: fps < 5,
+too few verifiable/long episodes, or an uncalibratable noise floor → **ABSTAIN**,
+not a guess.
+
+**Results (hardened):**
+
+| Dataset | Robot / role | fps | verifiable | systematic | verdict |
+|---------|--------------|-----|------------|-----------|---------|
+| aloha_static_tape | bimanual tabletop (**positive control**) | 50 | **50/50** | +2.82f (+56 ms) | CLEAN (internally consistent) |
+| droid_100 (wrist) | Franka in-the-wild | 15 | 12/50 | +0.12f (+8 ms) | CLEAN (abstains on 38) |
+| viola (OXE) | Franka tabletop, far 3rd-person | 20 | 10/60, noise 9.9f | −10.6f (unreliable) | CLEAN (abstains in substance) |
+| fractal / RT-1 (OXE) | Google robot | 3 | — | — | **ABSTAIN** (fps too coarse) |
+
+**Two false positives, found and killed — the precision discipline that matters.**
+A first pass reported "CORRUPTION FOUND": 14 fractal episodes and 1 DROID episode.
+Both were artifacts. Fractal's within-episode noise floor collapsed to 0.00f at
+3 fps / short episodes → threshold defaulted to 2f → normal cross-episode spread
+tripped it. DROID's single flag was a bare-threshold outlier that failed the
+self-consistency test. The hardening (fps guard + self-consistency requirement +
+uncalibratable-floor abstain) drove both to **0**. At 76k episodes those artifacts
+would have been thousands of false accusations.
+
+**Dataset-availability reality:** of three OXE picks, only **viola** loaded
+cleanly. `bridge_data_v2` and `fractal` are third-party v3.0 conversions with
+non-standard sharding (data and video shard indices unrelated; global row
+offsets), and fractal runs at 3 fps — below the method's temporal resolution.
+
+### POC verdict — against the binding criteria written before running
+
+- **Corruption-existence gate: FAIL (honest negative).** No corruption survived
+  verification in any dataset the tool can trust. Every "found" flag was an
+  artifact we caught. The only OXE set we could partly see (viola) abstains in
+  substance; the others were unloadable or too coarse.
+- **But the method and its honesty machinery are validated.** ALOHA is an
+  end-to-end success on *real* teleop: 100% verifiable, a plausible **+56 ms**
+  systematic camera latency, internally consistent. Recalibration works. The
+  audit refuses to cry wolf — it killed its own false positives and abstains
+  where it cannot see.
+- **Newly exposed, decision-relevant limitation — a narrow visibility envelope.**
+  The method needs dense, camera-filling motion (bimanual / close overhead like
+  ALOHA, or wrist egomotion). Most of OXE is single-arm 3rd-person with the arm
+  small in frame → it abstains. So even if corruption exists in OXE, this method
+  can only audit the ALOHA-class slice of it.
+
+**Bottom line before applying:** roboinfer is a *working, honest measurement
+instrument* on suitable (dense-motion) real teleop, with a confidence gate that
+correctly abstains and a QA-grade precision discipline. It is **not** yet proof
+that catchable corruption exists at scale — every accessible curated dataset came
+back clean or unverifiable, and the corpus we could load is narrow. The
+existential question ("does silent corruption exist in data people actually
+train on, at a rate worth selling against?") remains **open**, gated now less by
+the detector than by (a) access to raw un-curated logs and (b) the method's
+motion-density envelope. That is the honest state to decide the pivot on.
+
+### Reproduce (Day 6–7)
+
+```bash
+python -m roboinfer.cli audit data/lerobot/aloha_static_tape   # 50/50 verifiable, CLEAN, +56ms
+python -m roboinfer.cli audit data/lerobot/droid_100 --camera wrist   # abstains on 38/50, CLEAN
+python -m roboinfer.cli audit data/lerobot/viola              # abstains in substance
+python -m roboinfer.cli audit data/lerobot/fractal            # ABSTAIN (3 fps)
+```

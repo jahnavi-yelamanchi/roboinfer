@@ -79,30 +79,55 @@ def load_lerobot(path: str, limit: int | None = None, camera: str | None = None,
 
     info = json.load(open(os.path.join(path, "meta", "info.json")))
     hz = float(info["fps"])
-    vid_keys = [k for k, v in info["features"].items() if v.get("dtype") == "video"]
-    if not vid_keys:
-        raise ValueError(f"no video feature in {path}")
-    cam = next((k for k in vid_keys if camera and camera in k), vid_keys[0])
     if "file_index" not in info["data_path"]:
         raise ValueError(f"{path}: only LeRobot v3.0 layout supported "
                          f"(data_path={info['data_path']})")
+    if "observation.state" not in info["features"]:
+        raise ValueError(f"{path}: no observation.state (proprioception) — "
+                         f"vision-vs-joint offset needs a proprioceptive stream")
+    vid_keys = [k for k, v in info["features"].items() if v.get("dtype") == "video"]
+    if not vid_keys:
+        raise ValueError(f"no video feature in {path}")
+    if camera:
+        cam = next((k for k in vid_keys if camera in k), vid_keys[0])
+    else:                                        # default: a fixed camera (arm in
+        _wrist = ("wrist", "hand", "eye_in_hand")   # frame), not a wrist/egomotion cam
+        cam = next((k for k in vid_keys if not any(w in k.lower() for w in _wrist)),
+                   vid_keys[0])
+
+    vck, vfk = f"videos/{cam}/chunk_index", f"videos/{cam}/file_index"
+    fts = f"videos/{cam}/from_timestamp"
+
+    def _pf(r):
+        return os.path.join(path, info["data_path"].format(
+            chunk_index=int(r["data/chunk_index"]), file_index=int(r["data/file_index"])))
+
+    def _vf(r):
+        return os.path.join(path, info["video_path"].format(
+            video_key=cam, chunk_index=int(r[vck]), file_index=int(r[vfk])))
 
     em = pq.read_table(_glob.glob(os.path.join(path, "meta", "episodes", "**", "*.parquet"),
                                   recursive=True)[0]).to_pandas()
     em = em.sort_values("episode_index")
+    # partial-download safe: keep only episodes whose data + video shards are present
+    em = em[em.apply(lambda r: os.path.exists(_pf(r)) and os.path.exists(_vf(r)), axis=1)]
+    if len(em) == 0:
+        raise ValueError(f"{path}: no episodes with both shards present on disk")
     if limit:
         em = em.head(limit)
-    vck, vfk = f"videos/{cam}/chunk_index", f"videos/{cam}/file_index"
-    fts = f"videos/{cam}/from_timestamp"
     em = em.sort_values([vck, vfk, fts])       # decode order = shard order
 
     cap, cur, fpos = None, None, 0
     for _, r in em.iterrows():
         i = int(r["episode_index"])
-        pf = os.path.join(path, info["data_path"].format(
-            chunk_index=int(r["data/chunk_index"]), file_index=int(r["data/file_index"])))
-        a, b = int(r["dataset_from_index"]), int(r["dataset_to_index"])
-        t = pq.read_table(pf, columns=["observation.state", "action", "timestamp"]).slice(a, b - a)
+        pf = _pf(r)
+        # filter the shard by episode_index (robust to global-vs-local row indexing
+        # and multi-episode shards) rather than slicing by global dataset_from_index
+        t = pq.read_table(pf, columns=["observation.state", "action", "timestamp",
+                                       "episode_index"],
+                          filters=[("episode_index", "==", i)])
+        if t.num_rows == 0:
+            continue
         joints = np.stack(t["observation.state"].to_pylist()).astype(np.float64)
         actions = np.stack(t["action"].to_pylist()).astype(np.float64)
         ts = np.asarray(t["timestamp"].to_pylist(), np.float64)

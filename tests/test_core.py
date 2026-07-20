@@ -36,6 +36,34 @@ def test_injectors_roundtrip():
     assert np.array_equal(sw.joints[:, 1], ep.joints[:, 3])   # columns swapped
 
 
+def test_confidence_separates_signal_from_noise():
+    """Permutation-null confidence: a real lagged signal reads verifiable; two
+    independent signals read ~unverifiable."""
+    from roboinfer.estimate import estimate_offset
+    rng = np.random.default_rng(1)
+    latent = rng.standard_normal(400)                # broadband, sharply localizable lag
+    a = latent + 0.05 * rng.standard_normal(400)
+    b = np.r_[np.zeros(4), latent[:-4]] + 0.05 * rng.standard_normal(400)   # delayed 4
+    est = estimate_offset(a, b, rng=np.random.default_rng(0))
+    assert abs(abs(est.offset) - 4) <= 1.0           # recovers the lag magnitude
+    assert est.confidence >= 0.3                     # and trusts it
+    noise = estimate_offset(a, np.cumsum(rng.standard_normal(400)),
+                            rng=np.random.default_rng(0))
+    assert noise.confidence < est.confidence         # unrelated => less trusted
+
+
+def test_audit_abstains_on_low_fps():
+    """Audit must not cry wolf: too-coarse fps => ABSTAIN, no flags."""
+    from roboinfer.data import Episode
+    from roboinfer.detect import dataset_audit
+    rng = np.random.default_rng(0)
+    eps = [Episode(rgb=rng.integers(0, 255, (80, 8, 8, 3), np.uint8),
+                   joints=rng.standard_normal((80, 7)), actions=rng.standard_normal((80, 7)),
+                   ts=np.arange(80) / 3.0, name=f"e{i}", hz=3.0) for i in range(6)]
+    r = dataset_audit(eps)
+    assert r["verdict"].startswith("ABSTAIN") and "anom_ct" not in r
+
+
 def test_ts_jitter_score():
     """Uniform clock scores 1.0 (never flags); a dropped frame spikes the ratio."""
     from roboinfer.data import Episode

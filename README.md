@@ -41,8 +41,21 @@ LeRobot v3.0 datasets. **The sim numbers largely do not transfer out of the box*
 - Frozen-camera detection transfers cleanly (recall 1.00 everywhere). The
   action-consistency family is tied to LIBERO's action space and does not.
 
-Bottom line: today this is a **sim + controlled-rig** tool. Real-data efficacy
-and the "corruption exists in the wild" claim are **not yet proven**.
+**Day 6–7 (recalibrate + hunt corruption in OXE).** Replaced the confidence with
+a per-episode permutation null → ALOHA went **0/50 → 50/50 verifiable** (97% track
+a known injected shift) while DROID stayed abstained. Added an `audit` mode that
+separates a rig's systematic offset (reported) from real per-episode
+inconsistency (flagged only if internally self-consistent yet a cohort outlier),
+and abstains when it can't measure. Result across ALOHA / DROID / OXE (viola,
+fractal): **no corruption survived verification** — two initial "found" flags
+were artifacts the hardening killed. ALOHA is a real-teleop success (+56 ms
+latency, internally consistent); everything else abstains.
+
+Bottom line: a **working, honest measurement instrument on dense-motion real
+teleop**, with a QA-grade precision discipline (it abstains rather than guess).
+**Not** yet proof that catchable corruption exists at scale — curated data comes
+back clean/unverifiable, and the method's visibility envelope (needs
+camera-filling motion) is narrow. See `DATA.md` for the full POC verdict.
 
 ## How it works
 
